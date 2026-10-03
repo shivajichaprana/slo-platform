@@ -1,0 +1,32 @@
+# Terraform
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+*.tfplan
+terraform.tfplan
+crash.log
+crash.*.log
+*.tfvars
+!*.tfvars.example
+
+# Generated alert and dashboard artifacts. The specs are the source of truth;
+# anything rendered from them is rebuilt on demand and never reviewed as a diff.
+generated/
+*.generated.json
+*.generated.yaml
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Editors and operating systems
+.idea/
+.vscode/
+*.swp
+.DS_Store
