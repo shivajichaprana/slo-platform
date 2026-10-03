@@ -1,0 +1,157 @@
+# A worked specification. Every field here is one the schema requires or one
+# whose absence costs a check, and the comments say which.
+apiVersion: slo.platform/v1
+kind: ServiceLevelObjectives
+
+metadata:
+  service: checkout-api
+  # A team, never a person: an objective outlives whoever first wrote it down.
+  owner: payments-platform
+  tier: critical
+  description: >-
+    Objectives for the request path that takes payment. Budget decisions for this
+    service are taken by its owning team and are enforced by the policy gate.
+  runbook: https://example.invalid/runbooks/checkout-api
+
+objectives:
+  # ---------------------------------------------------------------------------
+  # Availability, as a plain ratio of good to valid events.
+  # ---------------------------------------------------------------------------
+  - name: availability
+    title: Checkout requests are served successfully
+    description: >-
+      Counts server-side failures only. A request rejected because the caller sent
+      something invalid is a valid event that the service got right, so 4xx stays in
+      the denominator and out of the failure count.
+    sli:
+      kind: ratio
+      good_query: >-
+        sum(rate(http_requests_total{service="checkout-api",code!~"5.."}[5m]))
+      valid_query: >-
+        sum(rate(http_requests_total{service="checkout-api"}[5m]))
+      # Required, and the answer matters more than the field. Both of these are
+      # places where a failure removes traffic instead of failing it, which an
+      # indicator built on this denominator reads as health.
+      blind_spots:
+        - >-
+            Requests that never reach the service are invisible: a DNS or edge failure
+            removes traffic from the denominator rather than adding to the numerator.
+        - >-
+            A client that times out locally and retries is counted twice, once per
+            attempt, so a slow dependency inflates the denominator and flatters the ratio.
+      sampling:
+        expected_events_per_hour: 120000
+        note: Steady weekday traffic. Overnight volume is roughly a tenth of this.
+    objective: 0.995
+    window:
+      # Rolling, so an incident keeps costing budget for four weeks rather than
+      # being forgiven at a month boundary.
+      kind: rolling
+      duration: 28d
+    alerting:
+      policy: multiwindow-burn-rate
+      tiers:
+        - name: fast
+          burn_rate: 14.4
+          long_window: 1h
+          short_window: 5m
+          notify: page
+        - name: medium
+          burn_rate: 6
+          long_window: 6h
+          short_window: 30m
+          notify: page
+        # The slowest tier tickets rather than pages: nothing about a three-day
+        # burn gets better for being acted on at 3am.
+        - name: slow
+          burn_rate: 1
+          long_window: 3d
+          short_window: 6h
+          notify: ticket
+
+  # ---------------------------------------------------------------------------
+  # Latency, expressed as a proportion rather than as a percentile.
+  # ---------------------------------------------------------------------------
+  - name: latency
+    title: Checkout requests complete within 300 milliseconds
+    description: >-
+      Stated as a share of requests under a threshold, not as a percentile, because a
+      percentile is not a proportion and cannot produce an error budget — and because
+      percentiles do not compose, so a percentile objective cannot be evaluated over
+      any window except the one it was measured in.
+    sli:
+      kind: threshold
+      valid_query: >-
+        sum(rate(http_request_duration_seconds_count{service="checkout-api"}[5m]))
+      metric: http_request_duration_seconds
+      threshold: 300
+      unit: milliseconds
+      comparison: less_than
+      blind_spots:
+        - >-
+            Measured at the server, so it excludes everything between the server and the
+            customer: the objective can hold while the page feels slow.
+        - >-
+            A request that fails fast is fast, so this objective improves during an
+            outage; it is only meaningful read next to the availability objective.
+      sampling:
+        expected_events_per_hour: 120000
+    objective: 0.99
+    window:
+      kind: rolling
+      duration: 28d
+    alerting:
+      policy: multiwindow-burn-rate
+      tiers:
+        - name: fast
+          burn_rate: 14.4
+          long_window: 1h
+          short_window: 5m
+          notify: page
+        - name: slow
+          burn_rate: 3
+          long_window: 1d
+          short_window: 2h
+          notify: ticket
+
+  # ---------------------------------------------------------------------------
+  # A calendar-window objective, because this one is reported to someone outside
+  # engineering who reads it per month.
+  # ---------------------------------------------------------------------------
+  - name: refund-settlement
+    title: Refunds are settled within twenty-four hours
+    description: >-
+      A calendar window on purpose: the commitment this objective records is made per
+      calendar month, so measuring it over a trailing window would report a number
+      nobody agreed to. The cost of that choice is that the budget resets at the month
+      boundary, which forgives an incident on the 31st and punishes one on the 1st.
+    sli:
+      kind: threshold
+      valid_query: >-
+        sum(increase(refunds_settled_total{service="checkout-api"}[1h]))
+      metric: refund_settlement_seconds
+      threshold: 86400
+      unit: seconds
+      comparison: less_than_or_equal
+      blind_spots:
+        - >-
+            A refund that is never settled is never counted, so a stuck queue shrinks the
+            denominator instead of breaching the objective; queue depth is alerted
+            separately and that alert is not generated from this document.
+      sampling:
+        expected_events_per_hour: 2000
+    objective: 0.999
+    window:
+      kind: calendar
+      period: month
+      timezone: UTC
+    alerting:
+      policy: multiwindow-burn-rate
+      tiers:
+        # One tier, ticketing: this objective is a commitment to report on, not a
+        # reason to wake anybody.
+        - name: budget-burn
+          burn_rate: 6
+          long_window: 6h
+          short_window: 30m
+          notify: ticket

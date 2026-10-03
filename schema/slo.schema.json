@@ -1,0 +1,226 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/shivajichaprana/slo-platform/blob/main/schema/slo.schema.json",
+  "title": "Service-level objective specification",
+  "description": "Structure of an objective specification. This schema settles shape, vocabulary and bounds. It cannot settle arithmetic — whether a burn-rate tier is reachable, whether an alert window is a sane fraction of the objective window, whether the signal is sampled finely enough to express the threshold — so those live in the validator alongside it, and the two are meant to be run together.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["apiVersion", "kind", "metadata", "objectives"],
+  "properties": {
+    "apiVersion": {
+      "description": "Specification version. Bumped only for a change that would alter the meaning of an existing document, so a pinned consumer never reinterprets one.",
+      "const": "slo.platform/v1"
+    },
+    "kind": { "const": "ServiceLevelObjectives" },
+    "metadata": { "$ref": "#/$defs/metadata" },
+    "objectives": {
+      "description": "At least one. A document with no objectives is a file that generates nothing and reports success.",
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/objective" }
+    }
+  },
+  "$defs": {
+    "metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["service", "owner", "tier"],
+      "properties": {
+        "service": {
+          "description": "The thing these objectives are about, as its consumers name it.",
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]{1,47}$"
+        },
+        "owner": {
+          "description": "Team accountable for the objectives and for the budget decisions taken from them. A person is deliberately not accepted here: an objective outlives whoever wrote it.",
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]{1,47}$"
+        },
+        "tier": {
+          "description": "How much the service is allowed to cost in human attention. Used by the validator to judge whether paging on a given burn-rate tier is proportionate.",
+          "enum": ["critical", "important", "best-effort"]
+        },
+        "description": { "type": "string", "maxLength": 500 },
+        "runbook": {
+          "description": "Where the responder goes when an alert generated from this document fires.",
+          "type": "string",
+          "format": "uri"
+        }
+      }
+    },
+    "objective": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "title", "sli", "objective", "window", "alerting"],
+      "properties": {
+        "name": {
+          "description": "Identity, not prose. Every generated alert name and every stored budget observation is keyed on it, so renaming an objective deletes one and starts the other over. Capped at 32 characters because the deployment's own name prefix and the alert tier suffix share a 64-character ceiling with it.",
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]{1,31}$"
+        },
+        "title": {
+          "description": "The objective as a sentence a non-engineer would agree with. Free to change; it is not an identifier.",
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 120
+        },
+        "description": { "type": "string", "maxLength": 1000 },
+        "sli": { "$ref": "#/$defs/sli" },
+        "objective": {
+          "description": "Target proportion of good events. Strictly below 1: an objective of 1 is not an objective, it is the claim that there is no error budget, which makes every burn-rate threshold zero and every burn rate infinite. The floor of 0.5 is a typo guard — a misplaced decimal point is far more common than a service that is allowed to fail half the time — and not a policy.",
+          "type": "number",
+          "minimum": 0.5,
+          "exclusiveMaximum": 1
+        },
+        "window": { "$ref": "#/$defs/window" },
+        "alerting": { "$ref": "#/$defs/alerting" }
+      }
+    },
+    "sli": {
+      "description": "An indicator is always a proportion: good events divided by valid events. The two kinds differ only in how `good` is obtained — given directly, or derived per event from a threshold. There is deliberately no percentile kind; see the threshold kind.",
+      "oneOf": [
+        { "$ref": "#/$defs/sliRatio" },
+        { "$ref": "#/$defs/sliThreshold" }
+      ]
+    },
+    "sliRatio": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "good_query", "valid_query", "blind_spots"],
+      "properties": {
+        "kind": { "const": "ratio" },
+        "good_query": {
+          "description": "Counts events the service got right.",
+          "type": "string",
+          "minLength": 1
+        },
+        "valid_query": {
+          "description": "Counts events the service was supposed to get right. Must be a superset of good_query — nothing enforces that mechanically, which is why blind_spots is required.",
+          "type": "string",
+          "minLength": 1
+        },
+        "blind_spots": {
+          "description": "What valid_query cannot see, stated by the author. This field is required because the usual way an availability indicator lies is a denominator measured behind the thing that broke: count requests arriving at the load balancer and a failure in front of it makes traffic vanish rather than fail, so the indicator reports health, or no data, during a total outage. The schema can force the question to be answered; it cannot check the answer. Write \"none identified\" and a reviewer can at least see that claim being made.",
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 3 }
+        },
+        "sampling": { "$ref": "#/$defs/sampling" }
+      }
+    },
+    "sliThreshold": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "valid_query", "metric", "threshold", "unit", "comparison", "blind_spots"],
+      "properties": {
+        "kind": {
+          "description": "Counts, per event, whether a measured value met a threshold, and divides by valid events.\n\nThis is how a latency objective is expressed here, and the reason there is no percentile kind: a percentile is not a proportion, so no error budget can be computed from one, and percentiles do not compose — the average of a window's p95 values is not that window's p95, so an objective written as \"p95 under 300ms\" cannot be evaluated over any window other than the one it was measured in. \"99% of requests complete within 300ms\" is the same intent, is a proportion, and composes.",
+          "const": "threshold"
+        },
+        "valid_query": { "type": "string", "minLength": 1 },
+        "metric": {
+          "description": "The per-event value compared against the threshold.",
+          "type": "string",
+          "minLength": 1
+        },
+        "threshold": { "type": "number", "exclusiveMinimum": 0 },
+        "unit": { "enum": ["milliseconds", "seconds", "bytes", "count"] },
+        "comparison": {
+          "description": "Which side of the threshold is good. Required rather than defaulted: half of all threshold indicators are upper bounds and half are lower bounds, and a wrong default inverts the objective while still producing a plausible number.",
+          "enum": ["less_than", "less_than_or_equal", "greater_than", "greater_than_or_equal"]
+        },
+        "blind_spots": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 3 }
+        },
+        "sampling": { "$ref": "#/$defs/sampling" }
+      }
+    },
+    "sampling": {
+      "description": "How much traffic the indicator sees. Optional, and worth supplying: it is what lets the validator work out the finest error rate a window can express. An indicator with one sample per run cannot express an error rate below 1/samples, so a burn-rate threshold below that floor fires on a single bad event and the severity ladder above it is decoration.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["expected_events_per_hour"],
+      "properties": {
+        "expected_events_per_hour": { "type": "number", "exclusiveMinimum": 0 },
+        "note": { "type": "string", "maxLength": 300 }
+      }
+    },
+    "window": {
+      "description": "The span the objective is measured over. The kind is required and has no default, because the two kinds behave differently in the one situation that matters. A rolling window never resets, so an incident keeps consuming budget for the whole window length after it ends. A calendar window resets at its boundary, so the same incident is forgiven the next morning if it happens on the last day of the period and poisons the whole period if it happens on the first. Neither is the safe choice, so neither is the default.",
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "duration"],
+          "properties": {
+            "kind": { "const": "rolling" },
+            "duration": {
+              "description": "Trailing span, as minutes, hours or days. Weeks and months are deliberately not expressible: a month is not a duration — it is 28, 29, 30 or 31 days — so an objective measured per month is a calendar window, not a rolling one.",
+              "type": "string",
+              "pattern": "^[1-9][0-9]*(m|h|d)$"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "period"],
+          "properties": {
+            "kind": { "const": "calendar" },
+            "period": { "enum": ["week", "month", "quarter"] },
+            "timezone": {
+              "description": "Zone the period boundary falls in. A calendar budget resets at a wall-clock instant, so the zone is part of the objective rather than a display setting.",
+              "type": "string",
+              "default": "UTC"
+            }
+          }
+        }
+      ]
+    },
+    "alerting": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["policy", "tiers"],
+      "properties": {
+        "policy": {
+          "description": "Alerts are generated from the rate at which the budget is being spent, never from the indicator's current value. An indicator below its objective says the budget has already gone; a burn rate says how long is left.",
+          "const": "multiwindow-burn-rate"
+        },
+        "tiers": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 6,
+          "items": { "$ref": "#/$defs/burnTier" }
+        }
+      }
+    },
+    "burnTier": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "burn_rate", "long_window", "short_window", "notify"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]{1,15}$"
+        },
+        "burn_rate": {
+          "description": "Multiple of the budget's steady-state spend rate. A tier fires when the error rate over long_window reaches burn_rate x (1 - objective) — which is why a burn rate can be arithmetically unreachable for a low objective, and why the validator checks it rather than trusting the number.",
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "long_window": { "type": "string", "pattern": "^[1-9][0-9]*(m|h|d)$" },
+        "short_window": {
+          "description": "A second, shorter window evaluated at the same threshold, required to agree before the tier fires. It is what stops a tier staying latched for the rest of its long window after the burn has stopped.",
+          "type": "string",
+          "pattern": "^[1-9][0-9]*(m|h|d)$"
+        },
+        "notify": {
+          "description": "What happens when the tier fires. \"page\" wakes a human; \"ticket\" does not. A slow-burn tier that pages is the usual beginning of alert fatigue, because it fires on a condition nobody can act on faster by being awake.",
+          "enum": ["page", "ticket"]
+        }
+      }
+    }
+  }
+}
