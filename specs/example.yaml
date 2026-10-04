@@ -1,5 +1,11 @@
 # A worked specification. Every field here is one the schema requires or one
 # whose absence costs a check, and the comments say which.
+#
+# The queries are written for a Prometheus-compatible source, and their range
+# selectors are `$window` rather than a literal span. The window is supplied per
+# evaluation -- once for the budget, and once for each side of each burn-rate
+# tier -- so a query carrying its own range would return the same figure for all
+# of them and every threshold above the fastest would fire on one condition.
 apiVersion: slo.platform/v1
 kind: ServiceLevelObjectives
 
@@ -26,9 +32,9 @@ objectives:
     sli:
       kind: ratio
       good_query: >-
-        sum(rate(http_requests_total{service="checkout-api",code!~"5.."}[5m]))
+        sum(rate(http_requests_total{service="checkout-api",code!~"5.."}[$window]))
       valid_query: >-
-        sum(rate(http_requests_total{service="checkout-api"}[5m]))
+        sum(rate(http_requests_total{service="checkout-api"}[$window]))
       # Required, and the answer matters more than the field. Both of these are
       # places where a failure removes traffic instead of failing it, which an
       # indicator built on this denominator reads as health.
@@ -82,11 +88,11 @@ objectives:
     sli:
       kind: threshold
       valid_query: >-
-        sum(rate(http_request_duration_seconds_count{service="checkout-api"}[5m]))
+        sum(rate(http_request_duration_seconds_count{service="checkout-api"}[$window]))
       metric: http_request_duration_seconds
       threshold: 300
       unit: milliseconds
-      comparison: less_than
+      comparison: less_than_or_equal
       blind_spots:
         - >-
             Measured at the server, so it excludes everything between the server and the
@@ -128,7 +134,7 @@ objectives:
     sli:
       kind: threshold
       valid_query: >-
-        sum(increase(refunds_settled_total{service="checkout-api"}[1h]))
+        sum(increase(refund_settlement_seconds_count{service="checkout-api"}[$window]))
       metric: refund_settlement_seconds
       threshold: 86400
       unit: seconds

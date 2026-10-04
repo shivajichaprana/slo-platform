@@ -16,6 +16,7 @@ from it.
 |---|---|---|
 | Error budget | Objective and window | The arithmetic is simple and is nearly always wrong by hand, because a budget is a duration or an event count, never a percentage. |
 | Burn-rate alerts | Budget and alert policy | Multi-window alert thresholds are a function of the objective. Written by hand they are copied between services whose objectives differ. |
+| Indicator queries | Indicator definition and a window | A query written once and reused at every window answers the same thing every time, which quietly turns a multi-window alert policy into a single alert repeated. |
 | Policy decisions | Budget consumption | "Stop shipping when the budget is gone" is only enforceable if the budget is a number something can read. |
 
 ## Layout
@@ -32,6 +33,9 @@ from it.
 | `specs/` | Objective specifications. Read from inside the repository on purpose. |
 | `specs/example.yaml` | A worked specification; every field is one a check depends on. |
 | `tools/validate-specs.py` | Structural validation plus the arithmetic a schema cannot express. |
+| `sources/base.py` | The model an indicator source works from, and the vocabulary it reports in. |
+| `sources/cloudwatch.py` | CloudWatch metric math and Metrics Insights, with the limits of each. |
+| `sources/prometheus.py` | PromQL against the Prometheus query API, including histogram-derived indicators. |
 | `terraform.tfvars.example` | Placeholder values; copy to `terraform.tfvars`, which is ignored. |
 | `.tflint.hcl` | Lint configuration, including the conventions this repository enforces on itself. |
 
@@ -164,6 +168,168 @@ Budget figures for a calendar window are **nominal**: a month is 28, 29, 30 or 3
 the arithmetic needs one number, so 30 is used and every figure derived from it is labelled
 nominal rather than presented as fact.
 
+## Reading an indicator
+
+A specification says what proportion of events must be good. It does not say how
+to obtain that proportion, because the answer is a different sentence in every
+metric system. A source adapter is that translation, and there are two:
+`cloudwatch` and `prometheus`.
+
+**An adapter compiles; it never queries.** Nothing under `sources/` opens a
+socket, signs a request or reads a credential. Each adapter turns one objective
+into the request payloads a caller may send -- a whole-window figure for a
+report, and the two spans of each burn-rate tier -- so the arithmetic worth
+reviewing sits in a file rather than in a log, and can be checked without an
+account.
+
+**The window is supplied per evaluation, never written into the query.** An
+indicator query marks its range as `$window`:
+
+```yaml
+good_query: sum(rate(http_requests_total{service="checkout-api",code!~"5.."}[$window]))
+```
+
+The same query is evaluated once for the objective window, once for each tier's
+long window and once for each tier's short window. A query that pins its own
+range returns the same figure for all of them, so every threshold above the
+fastest tier fires on one condition and the multi-window policy is decoration --
+which is the thing this repository exists to prevent. A pinned range is
+therefore refused rather than rewritten: choosing which of several literal
+ranges to replace would be a guess.
+
+**The two sources are not interchangeable**, and a document is written for one of
+them whether or not it says so. An adapter handed a foreign dialect refuses,
+because the queries are opaque strings to both APIs: the alternative is a
+configuration that applies cleanly, creates every alert, and measures nothing.
+
+### CloudWatch
+
+Two dialects are accepted, and they are not variants of one another.
+
+*Metric math over metric statistics* reads stored metrics at a period, so it
+reaches the full retention of the data and an alarm may evaluate as much as
+seven days of it. Indicators are written as compact metric references:
+
+```yaml
+good_query: AWS/ApplicationELB/HTTPCode_Target_2XX_Count:Sum[LoadBalancer=app/checkout/50dc6c495c0c9188]
+valid_query: AWS/ApplicationELB/RequestCount:Sum[LoadBalancer=app/checkout/50dc6c495c0c9188]
+```
+
+*Metrics Insights* reads a `SELECT` statement, which can select across metrics
+without naming each one. It reaches two weeks of history for a chart and **the
+most recent three hours for an alarm condition**, so any tier slower than three
+hours cannot be an alarm on a Metrics Insights query at all.
+
+Four properties of CloudWatch shape what is generated, and each of them is a
+configuration the service accepts and reports on:
+
+- **The alarm cannot be given the aggregate the report quotes.** Summing good
+  events over the window, summing valid events and dividing is the natural way
+  to write the figure, and metric math will do it -- a sum over one time series
+  returns a scalar. The published guidance is not to put a scalar-returning
+  function in an alarm, because an evaluating alarm retrieves more data points
+  than its evaluation periods ask for and such a function does not answer the
+  same way when it is given them. So the window aggregate is compiled for the
+  report, the alarm is compiled as per-period arithmetic, and a scalar aggregate
+  reaching an alarm expression is refused.
+- **A total outage looks like missing data.** A period in which every request
+  failed leaves the success metric with no data point, so the ratio is absent
+  rather than zero -- and an alarm holds its previous state on missing data
+  unless told otherwise. Every alarm expression therefore fills its numerator
+  with zero, and because a fill cannot invent a series that was never reported
+  at all, every alarm also treats missing data as breaching.
+- **A long window is a tumbling period, not a sliding one.** An alarm compares
+  period-aligned data points, so a one-hour window is each clock hour and not
+  the trailing hour. A burn starting mid-period is split across two periods and
+  can breach neither.
+- **A period has to suit the window's age.** One-minute data is kept for 15
+  days, five-minute for 63, one-hour for 455. A four-week budget asked for at
+  one-minute resolution is answered for the recent fortnight and silently
+  unanswered before it.
+
+A threshold indicator is **refused** for CloudWatch rather than approximated.
+Metric math compares period aggregates, not events, so a comparison against the
+threshold counts the periods whose aggregate was good instead of the events that
+were good -- a different quantity that tracks the right one closely enough never
+to be questioned. A percentile statistic is not an answer either, for the reason
+the specification has no percentile kind.
+
+### Managed Prometheus
+
+An objective compiles to query parameters for the Prometheus HTTP API: an
+instant query for the window figure, and one per side of each tier.
+
+- **An absent series is not a zero.** A selector matching nothing returns no
+  sample, so a renamed label empties the whole expression and an alerting rule
+  over it fires on nothing. Division makes it worse: zero over zero is NaN,
+  every comparison against NaN is false, and no traffic becomes
+  indistinguishable from healthy traffic. Numerators are therefore defaulted to
+  zero and denominators deliberately are not, because an absent denominator
+  means nothing was *measured* rather than nothing *failed*.
+- **Each objective also gets a staleness expression.** No burn-rate tier can
+  report a vanished denominator -- every one of them evaluates to nothing and
+  nothing does not fire -- so one expression per objective asks the question
+  separately, over the shortest window any tier uses.
+- **A rate needs at least two samples in its range.** A window shorter than
+  twice the sample interval yields nothing rather than zero, so a tier can be
+  unable to fire for a reason unrelated to the service. The interval is an input
+  to the adapter because it is a property of the deployment, not of the
+  objective.
+- **A threshold indicator's numerator is derived from its denominator** by
+  swapping the histogram's observation count for one of its cumulative buckets.
+  That is the only construction that guarantees both halves count the same
+  population and use the same range-vector function: a numerator written
+  independently inherits none of the denominator's label selection, and a rate
+  divided by an increase is out by the length of the window, which makes a tier
+  fire permanently.
+- **A bucket boundary is a label value, not a number.** `le="0.30"` does not
+  match a bucket published as `0.3`, and a boundary that was never configured
+  matches nothing -- numerator empty, ratio absent, objective reported as met. A
+  cumulative bucket also cannot express a strict comparison, so `less_than` is
+  compiled as `less_than_or_equal` and said to be.
+
+### Exercising a source
+
+```bash
+python3 -m sources.prometheus specs            # report
+python3 -m sources.prometheus specs --json     # payloads and findings
+python3 -m sources.cloudwatch specs            # refuses this example, by design
+```
+
+The shipped example is written for Prometheus, so the CloudWatch adapter refuses
+it. That is the dialect guard working, not a failure.
+
+| Code | What it means |
+|---|---|
+| `S100` | The indicator is not written for this source, so nothing was compiled. |
+| `S101` | A metric reference, or a metric name, could not be read. |
+| `S102` | The query identifies more than one series where one is required. |
+| `S200` | The period or resolution does not reach as far back as the window asks. |
+| `S201` | The window exceeds the points one range query may return. |
+| `S202` | The window is beyond the reach of this query engine entirely. |
+| `S203` | The window holds too few samples for a rate to be computed. |
+| `S204` | A calendar window's length is nominal, so every figure from it is too. |
+| `S205` | A threshold was converted into the unit the metric is published in. |
+| `S206` | The window figure is correct and expensive; a recorded ratio is cheaper. |
+| `S207` | Counts over a range are extrapolated, so a budget in events is an estimate. |
+| `S300` | A query pins its own range, so every window would read the same figure. |
+| `S301` | A construct belongs in the report rather than in an alarm. |
+| `S302` | Missing data would read as success, and how the expression handles it. |
+| `S303` | The statistic does not count events, so the ratio is not a proportion. |
+| `S304` | A comparison the backend can only approximate, and by how much. |
+| `S305` | The indicator kind cannot be expressed on this source at all. |
+| `S306` | The numerator depends on a bucket boundary that may not exist. |
+| `S307` | Good means above the boundary, which a cumulative bucket reaches by subtraction. |
+| `S308` | Only the staleness expression distinguishes a measured success from no measurement. |
+| `S309` | Numerator and denominator would count different populations. |
+| `S400` | An alarm's evaluation span is past what the service permits. |
+| `S401` | An alarm on this dialect cannot see the span its threshold was computed for. |
+| `S402` | A service cap the query can exceed while still succeeding. |
+
+Findings are errors, warnings or notes. An error means nothing was compiled for
+that objective: there is no partial output, because a half-translated indicator
+deploys as readily as a whole one.
+
 ## Conventions
 
 - Inputs are validated where they are declared; cross-field rules that a single input
@@ -175,6 +341,9 @@ nominal rather than presented as fact.
   silence.
 - Version constraints are floors with closed upper bounds, and each bound carries the
   reason it exists.
+- A translation that cannot preserve something says so and stops. Nothing is quietly
+  substituted, approximated or partially emitted, because every one of those produces
+  a configuration that deploys cleanly and reports the wrong thing.
 
 ## Versioning
 
