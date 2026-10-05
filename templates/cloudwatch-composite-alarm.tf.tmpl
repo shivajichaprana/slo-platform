@@ -1,0 +1,13 @@
+# @{comment}
+resource "aws_cloudwatch_composite_alarm" "@{label}" {
+  alarm_name        = "@{alarm_name}"
+  alarm_description = "@{description}"
+
+  # Interpolated from the resources rather than written as a literal name, so
+  # the dependency is one Terraform can see. Both children treat missing data
+  # as breaching, so a series that stops reporting satisfies this rule too.
+  alarm_rule = "ALARM(\"${aws_cloudwatch_metric_alarm.@{long_label}.alarm_name}\") AND ALARM(\"${aws_cloudwatch_metric_alarm.@{short_label}.alarm_name}\")"
+
+  alarm_actions = [var.slo_alert_topic_arns["@{notify}"]]
+  ok_actions    = [var.slo_alert_topic_arns["@{notify}"]]
+}

@@ -1,0 +1,16 @@
+# @{comment}
+resource "aws_cloudwatch_metric_alarm" "@{label}" {
+  alarm_name          = "@{alarm_name}"
+  alarm_description   = "@{description}"
+  comparison_operator = "@{comparison}"
+  threshold           = @{threshold}
+  evaluation_periods  = @{evaluation_periods}
+  datapoints_to_alarm = @{datapoints_to_alarm}
+  treat_missing_data  = "@{treat_missing_data}"
+
+  # The composite alarm notifies; this one only reports a state. Left enabled,
+  # one tier would send three notifications for the same condition.
+  actions_enabled = false
+
+@{metric_queries}
+}

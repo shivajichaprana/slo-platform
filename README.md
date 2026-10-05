@@ -36,6 +36,9 @@ from it.
 | `sources/base.py` | The model an indicator source works from, and the vocabulary it reports in. |
 | `sources/cloudwatch.py` | CloudWatch metric math and Metrics Insights, with the limits of each. |
 | `sources/prometheus.py` | PromQL against the Prometheus query API, including histogram-derived indicators. |
+| `generator/burn_rate.py` | What a burn-rate tier buys: detection, cost, and what it cannot see. |
+| `generator/render.py` | Rendering a policy into alerting rules, alarms and a budget report. |
+| `templates/` | Layout and prose for the targets with no serialiser; values are escaped, never trusted. |
 | `terraform.tfvars.example` | Placeholder values; copy to `terraform.tfvars`, which is ignored. |
 | `.tflint.hcl` | Lint configuration, including the conventions this repository enforces on itself. |
 
@@ -329,6 +332,123 @@ it. That is the dialect guard working, not a failure.
 Findings are errors, warnings or notes. An error means nothing was compiled for
 that objective: there is no partial output, because a half-translated indicator
 deploys as readily as a whole one.
+
+## Generating alerts
+
+```bash
+python3 -m generator.render specs --render report                     # the arithmetic, as prose
+python3 -m generator.render specs --render prometheus --out generated # alerting rules
+python3 -m generator.render specs --render cloudwatch --out generated # alarms, as Terraform
+python3 -m generator.render specs --render report --json              # the computed plan
+```
+
+An objective says what proportion of events must be good and at what multiples of the
+budget's spend rate somebody should be told. It does not say what those choices buy, and
+that is what is computed here.
+
+### What a tier actually promises
+
+A tier fires when the error rate averaged over its long window reaches
+`burn_rate x (1 - objective)`. An incident at a constant error rate `r` pushes that
+trailing average up in proportion, so the condition is met after:
+
+```
+detection = threshold x long_window / r
+```
+
+There is therefore no single detection time for a tier — it is a curve, fast for a total
+outage and asymptotically the whole long window for an incident sitting on the threshold.
+Substituting that back into the budget consumed gives the figure that does **not** depend
+on the incident:
+
+```
+budget spent at detection = burn_rate x long_window / objective_window
+```
+
+`r` cancels. The share of the budget already gone when a tier fires is the same whether the
+service is wholly down or barely degraded, and that figure — not the burn rate — is what
+choosing a tier costs. It is the one worth arguing about, and the two window fields in the
+specification obscure it completely.
+
+Two consequences follow from the same arithmetic and are reported per tier:
+
+- **Every tier is blind to short incidents.** The long average cannot reach the threshold
+  before `threshold x long_window` has elapsed, even at a 100% error rate, so an outage
+  that ends sooner is invisible to that tier however complete it was. The smallest such
+  figure across the tiers is the fastest the whole policy can ever be.
+- **Every policy is blind to a band of slow burns.** The lowest threshold in the policy is
+  the lowest sustained error rate anything will report. A rate just under it spends the
+  budget in `objective_window / lowest_burn_rate` with nothing firing at any point — unless
+  the slowest burn rate is 1, which closes the band at the cost of a tier that fires while
+  the service is meeting its objective.
+
+The short window's contribution is also arithmetic rather than intuition. For a constant-rate
+incident it is already above the threshold by the time the long window crosses it, so it does
+not affect firing; what it removes is the latch, cutting the time an alert stays up after the
+burn stops from most of the long window to most of the short one. What it costs is reported
+as `G310`: budget spent in bursts shorter than the detection floor can satisfy the long
+condition between them at a moment when the short window is quiet, and the tier stays silent.
+
+### What is rendered
+
+| Target | Output | Shape |
+|---|---|---|
+| `prometheus` | `<service>-<objective>.rules.yaml` | One rule per tier, two conditions joined by `and`, plus a staleness rule. |
+| `cloudwatch` | `<service>-<objective>.tf` | Two alarms and one composite per tier; a Terraform variable for the topics. |
+| `report` | `<service>-<objective>.md` | The arithmetic above, per tier, with every figure derived. |
+
+A tier is one Prometheus rule and three CloudWatch resources, and that is not a stylistic
+difference. A rule's expression can join two windows; an alarm evaluates a single period, so
+the long and the short window have to be two alarms with a composite above them requiring
+both. The children's actions are disabled so one tier sends one notification, and the
+composite's rule interpolates the children's names from the resources — written as literal
+strings, Terraform could not see the dependency and would be free to create the composite
+first.
+
+Rule files are **serialised**, not templated: their payload is PromQL, full of braces, quoted
+label values and comparison operators, and interpolating one into a text template is how a
+rule file becomes invalid or — worse — valid and different. The templates in `templates/`
+carry only what a serialiser cannot emit. Terraform has no serialiser here, so the escaping
+is explicit instead: every interpolated value passes through one function that escapes the
+quote, the backslash and the `${` and `%{` that open a Terraform interpolation. Templates use
+`@{...}` placeholders for the same reason — `$` belongs to HCL in those files.
+
+One caveat is carried into the generated artifacts rather than left here. The arithmetic above
+describes a query engine evaluating a trailing range. A CloudWatch alarm compares
+period-aligned data points, so it cannot fire before the end of the period the breach fell in:
+against that target every detection figure is an optimistic bound and the budget-at-detection
+figure is a lower bound. `G411` says so in the alarm file and in the report.
+
+| Code | Severity | What it means |
+|---|---|---|
+| `G100` | error | The objective declares no tier, so there is nothing to generate. |
+| `G200` | error | Two tiers share a name, so they render to one alert and one is lost. |
+| `G300` | note | The detection curve, and the budget figure that does not depend on it. |
+| `G301` | error | The tier fires above a 100% error rate, so it is deployable and permanently silent. |
+| `G302` | note | The shortest total outage the tier can see at all. |
+| `G303` | note | What the short window changes: the clearing time, not the firing time. |
+| `G304` | note | A burn rate at or below 1 fires while the objective is being met. |
+| `G305` | warning | The short window holds too few events for its threshold to mean anything. |
+| `G306` | warning | A tier that can never be the first notification about anything. |
+| `G307` | note/warning | The band of sustained error rates no tier reports, and what it costs. |
+| `G308` | warning | The fastest paging tier cannot see an outage short enough to matter to a human. |
+| `G309` | note | The budget in each unit it gets quoted in, and which of them is a translation. |
+| `G310` | note | Budget spent in brief bursts satisfies the long window and not the short one. |
+| `G400` | error | A rendered identity exceeds the target's name ceiling. |
+| `G401` | error | A rendered identity is produced twice, so one alert silently replaces another. |
+| `G402` | note | The rule's `for` duration is one evaluation interval, and why it is not the short window. |
+| `G403` | note | The two sides of the `and` must agree on labels or the rule never fires. |
+| `G404` | error | The source compiled only one of the two windows, so there is no multi-window condition. |
+| `G405` | warning | No staleness expression, so an unmeasured objective reads as a met one. |
+| `G406` | note | Why a tier is three CloudWatch resources, and why the children's actions are off. |
+| `G407` | note | How values are escaped for HCL, and which interpolations are deliberate. |
+| `G408` | error | The alarm description exceeds what the API accepts. |
+| `G409` | error | The composite alarm's rule exceeds what the API accepts. |
+| `G410` | warning | Nothing here can confirm the notification topics reach anybody. |
+| `G411` | warning | The target evaluates tumbling periods, so the computed detection figures are bounds. |
+
+Artifacts are written under `generated/`, which is ignored: the specification is the reviewed
+document and anything rendered from it is rebuilt rather than read as a diff.
 
 ## Conventions
 

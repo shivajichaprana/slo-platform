@@ -189,6 +189,12 @@ class Objective:
     tiers: tuple[Tier, ...]
     tier_policy: str | None = None
     document: str | None = None
+    # Prose and accountability. Neither is used to compile a query; both are
+    # carried because a generated alert that does not say what the objective
+    # was, or who owns the budget decision, is answered by reading the
+    # specification -- which is the one thing a responder cannot do quickly.
+    title: str = ""
+    owner: str = ""
 
     @classmethod
     def from_spec(cls, doc: dict[str, Any], obj: dict[str, Any], document: str | None = None) -> "Objective":
@@ -201,6 +207,8 @@ class Objective:
             tiers=tuple(Tier.from_spec(t) for t in obj["alerting"]["tiers"]),
             tier_policy=doc["metadata"].get("tier"),
             document=document,
+            title=obj.get("title", ""),
+            owner=doc["metadata"].get("owner", ""),
         )
 
     @property

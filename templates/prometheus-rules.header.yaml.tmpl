@@ -1,0 +1,17 @@
+# Alerting rules for @{service}/@{objective_name} -- generated from the
+# objective specification. Do not edit: the specification is the reviewed
+# artifact and this file is rebuilt from it.
+#
+# Objective: @{title}
+# Target:    @{target_rate} of valid events over @{window} (@{window_kind})
+# Budget:    @{budget_rate} of events, equivalent to @{budget_span} of total failure
+# Owner:     @{owner}
+#
+# Each tier is ONE rule with two conditions joined by `and`: the long window
+# decides when it fires, the short window decides when it clears. Both sides
+# carry the same threshold, which is the error rate the burn rate corresponds
+# to for this objective -- not a figure chosen per window.
+#
+# The staleness rule is not a tier. No burn-rate expression can report its own
+# missing denominator: when the series disappears every tier evaluates to
+# nothing, and a rule over nothing does not fire.

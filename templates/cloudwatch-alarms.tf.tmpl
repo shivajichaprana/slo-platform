@@ -1,0 +1,29 @@
+# Burn-rate alarms for @{service}/@{objective_name} -- generated from the
+# objective specification. Do not edit: the specification is the reviewed
+# artifact and this file is rebuilt from it.
+#
+# Objective: @{title}
+# Target:    @{target_rate} of valid events over @{window} (@{window_kind})
+# Budget:    @{budget_rate} of events, equivalent to @{budget_span} of total failure
+# Owner:     @{owner}
+#
+# Each tier is THREE resources, not one. A single alarm evaluates a single
+# period, so the long and the short window cannot be two conditions of one
+# alarm; they are two alarms, joined by a composite whose rule requires both.
+# The two children carry `actions_enabled = false` so that one tier produces
+# one notification rather than three, and the composite's rule interpolates the
+# children's names from the resources themselves -- a rule written as a literal
+# string would leave Terraform unable to see the dependency and free to create
+# the composite before the alarms it refers to.
+
+variable "slo_alert_topic_arns" {
+  description = "SNS topic ARN per notification class. A tier notifying by \"page\" and one notifying by \"ticket\" are different audiences, so they are different topics; pointing both keys at one topic is a choice to be made here rather than a default."
+  type        = map(string)
+
+  validation {
+    condition     = alltrue([for k in ["page", "ticket"] : contains(keys(var.slo_alert_topic_arns), k)])
+    error_message = "slo_alert_topic_arns must contain a \"page\" and a \"ticket\" key: an alarm created with no action is indistinguishable from one nobody reads."
+  }
+}
+
+@{alarm_blocks}

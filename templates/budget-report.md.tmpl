@@ -1,0 +1,51 @@
+# @{service} / @{objective_name}
+
+@{title}
+
+> Generated from the objective specification. Every figure below is derived; none is
+> configured. Rebuild it rather than editing it.
+
+| | |
+|---|---|
+| Objective | @{target_rate} of valid events |
+| Window | @{window} (@{window_kind})@{nominal_marker} |
+| Error budget | @{budget_rate} of events@{budget_events} |
+| Equivalent total failure | @{budget_span} |
+| Owner | @{owner} |
+| Indicator | @{sli_kind} |
+
+## What each tier buys
+
+A tier fires when the error rate averaged over its long window reaches `burn rate x budget`.
+Detection therefore depends on how bad the incident is, while the share of the budget already
+spent when the tier fires does not: the error rate cancels out of that expression, leaving
+`burn rate x long window / objective window`.
+
+Every figure below is derived for a query engine evaluating a trailing range. A target that
+compares period-aligned data points instead — a CloudWatch alarm — cannot fire before the end
+of the period the breach fell in, so against that target these are optimistic bounds rather
+than equalities.
+
+| Tier | Notifies | Fires at | Budget spent by then | Total outage | 50% errors | At threshold | Clears in |
+|---|---|---|---|---|---|---|---|
+@{tier_rows}
+
+The `Total outage` column is also the tier's blind spot, read from the other side: an outage
+that ENDS before `threshold x long window` has elapsed never moves the long average far
+enough to fire, whatever its severity. The two are one quantity. `Clears in` is measured from
+the end of a total outage and is set by the short window; without it the alert would stay
+latched for @{worst_latch}.
+
+## What this policy cannot see
+
+@{coverage}
+
+## Findings
+
+@{findings}
+
+## Generated artifacts
+
+| Target | Identity | Note |
+|---|---|---|
+@{artifact_rows}
