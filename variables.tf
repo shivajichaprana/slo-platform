@@ -74,3 +74,25 @@ variable "tags" {
     error_message = "Tag keys may not start with \"aws:\" — that prefix is reserved by AWS and the apply is rejected."
   }
 }
+
+variable "policy_rules_file" {
+  description = "Error-budget policy document, relative to this module. Read by both the Terraform gate and the evaluator, so the two cannot disagree about which gates exist."
+  type        = string
+  default     = "policy/rules.yaml"
+
+  validation {
+    condition     = can(regex("^[A-Za-z0-9_./-]+$", var.policy_rules_file)) && !startswith(var.policy_rules_file, "/") && !strcontains(var.policy_rules_file, "..")
+    error_message = "policy_rules_file must be a path inside the repository: an absolute path or one containing \"..\" puts the policy outside the review that covers the gates deployed from it."
+  }
+}
+
+variable "gate_parameter_tier" {
+  description = "Parameter Store tier for the published decisions. Standard caps a value at 4 KB; the advanced tier raises that and is the only tier supporting parameter policies, which this configuration deliberately does not use."
+  type        = string
+  default     = "Standard"
+
+  validation {
+    condition     = contains(["Standard", "Advanced", "Intelligent-Tiering"], var.gate_parameter_tier)
+    error_message = "gate_parameter_tier must be one of \"Standard\", \"Advanced\" or \"Intelligent-Tiering\"."
+  }
+}

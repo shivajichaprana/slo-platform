@@ -140,6 +140,11 @@ class Window:
     seconds: int
     nominal: bool
     label: str
+    # Only a calendar window has one. It is carried rather than resolved here
+    # because a boundary is an instant and this is a description of a span: the
+    # budget policy computes the reset, and doing it here would put a clock
+    # inside a value object every other component compares for equality.
+    timezone: str | None = None
 
     @classmethod
     def from_spec(cls, window: dict[str, Any]) -> "Window":
@@ -149,7 +154,10 @@ class Window:
         period = window["period"]
         if period not in NOMINAL_CALENDAR_SECONDS:
             raise ValueError(f"unknown calendar period: {period!r}")
-        return cls("calendar", NOMINAL_CALENDAR_SECONDS[period], True, period)
+        return cls(
+            "calendar", NOMINAL_CALENDAR_SECONDS[period], True, period,
+            window.get("timezone", "UTC"),
+        )
 
 
 @dataclass(frozen=True)

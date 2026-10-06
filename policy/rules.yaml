@@ -1,0 +1,163 @@
+# A worked error-budget policy. Every field is one the evaluator reads; the
+# comments say what each one buys and what the alternative would cost.
+#
+# The policy and the objectives are separate documents because they are decided
+# by different people on different timescales: an objective is a commitment about
+# the service, and this is a commitment about what happens to deployments while
+# that commitment is at risk. They are kept in one repository so that a change to
+# either is reviewed against the other.
+apiVersion: slo.platform/v1
+kind: ErrorBudgetPolicy
+
+metadata:
+  name: checkout-api-budget-policy
+  # A team. The owner is who the policy belongs to, which is not necessarily who
+  # approves an exemption from it -- see the approvers below.
+  owner: payments-platform
+  description: >-
+    What happens to deployments of the payment path while its error budgets are being
+    spent. Thresholds are stated as the fraction of budget REMAINING, because that is
+    the figure that is quoted in a conversation about whether to ship.
+
+defaults:
+  # A decision made from a figure computed this long ago is a decision about this
+  # long ago. Beyond it the figure is treated as unreadable, which hands the
+  # outcome to each gate's failure direction rather than to the last value that
+  # happened to be cached.
+  max_budget_age: 15m
+  # Applied to any exemption that does not set its own. Present so that adding an
+  # exemption cannot accidentally create an undated one.
+  exemption_max_duration: 24h
+
+gates:
+  # ---------------------------------------------------------------------------
+  # The request path. Two objectives, combined so that either can hold the gate.
+  # ---------------------------------------------------------------------------
+  - unit: checkout-api
+    description: >-
+      Deployments of the checkout service. Availability and latency are both governed
+      because a change that trades one for the other is exactly the change this gate
+      exists to slow down.
+    objectives:
+      - checkout-api/availability
+      - checkout-api/latency
+    # The most restrictive action any governed objective reaches. Adding an
+    # objective here can therefore only make the gate stricter, never looser.
+    combine: any
+    # Neither direction is safe, so it is stated per gate. "closed" is chosen
+    # here because this is the path that takes payment: a budget nobody can
+    # measure is not evidence that it is healthy. The cost is accepted and
+    # written down -- a failure in the metric pipeline stops deployments,
+    # including the one that would repair the metric pipeline.
+    on_unreadable_budget: closed
+    rules:
+      # The level alone, early, and only as a notification. A rule at this
+      # threshold cannot usefully block anything: half a budget remaining is a
+      # normal state for a service that had one bad week.
+      - name: notify-at-half-spent
+        action: notify
+        when:
+          remaining_below: 0.50
+        reason: >-
+          Half the budget is gone. Nothing is blocked; this exists so that the first
+          time anyone hears about the budget is not the day it runs out.
+
+      # The projection, not the level. This is the rule that does the work: it
+      # triggers on where the budget is GOING, which is the only condition under
+      # which stopping deployments changes the outcome.
+      - name: review-when-exhaustion-is-near
+        action: review
+        when:
+          exhaustion_within: 7d
+        # The exit is a level even though the entry is a projection. A projection
+        # recovers the instant the burn stops, so a projection-shaped exit would
+        # release the gate while the budget was still nearly gone.
+        clear_above: 0.35
+        reason: >-
+          At the observed burn rate the budget is spent within a week. Changes need a
+          named approver until the burn rate falls or the budget recovers.
+
+      # The floor. The one figure that cannot be argued with, and the only rule
+      # here that blocks outright.
+      - name: freeze-when-nearly-exhausted
+        action: freeze
+        when:
+          remaining_below: 0.10
+        # Well above the trigger: the gap is what stops the gate flapping as the
+        # consumption figure moves, and every flap is a pipeline that stops or
+        # starts.
+        clear_above: 0.25
+        reason: >-
+          Under a tenth of the budget remains. Only the exempt classes below ship until
+          the window has advanced far enough for the spend to leave it.
+    exemptions:
+      # Both carry an expiry. An exemption is granted while an incident is in
+      # progress and revoked by somebody remembering to revoke it, so an undated
+      # one is how a gate ends up permanently off with its policy still saying it
+      # is on.
+      - class: reliability-fix
+        description: >-
+          A change whose purpose is to stop the budget being spent. Without this class a
+          freeze blocks its own remedy.
+        approver: sre-review-board
+        max_duration: 48h
+      - class: security-patch
+        description: >-
+          A change that closes a disclosed vulnerability. Reliability is not the only
+          thing with a deadline.
+        approver: security-response
+        max_duration: 24h
+
+  # ---------------------------------------------------------------------------
+  # The calendar-window commitment. One objective, and a different failure
+  # direction, for reasons stated in the fields.
+  # ---------------------------------------------------------------------------
+  - unit: refund-worker
+    description: >-
+      Deployments of the refund settlement worker. Its objective is reported per
+      calendar month, which changes what a freeze here means: the budget returns at the
+      month boundary and not before, so a freeze is ended by the calendar rather than by
+      any fix.
+    objectives:
+      - checkout-api/refund-settlement
+    combine: any
+    # "open" here, and the asymmetry with the gate above is the point. This
+    # objective is a reporting commitment rather than a live customer-facing
+    # path, so an unmeasurable budget is not a reason to stop shipping. The cost
+    # is that a metric outage disables this gate silently, which is why the
+    # decision document records the readability of every objective and not only
+    # the state.
+    on_unreadable_budget: open
+    rules:
+      - name: notify-at-forty-percent-spent
+        action: notify
+        when:
+          remaining_below: 0.60
+        reason: >-
+          Early warning on a monthly commitment, where there is no second chance inside
+          the period.
+
+      - name: review-when-exhaustion-is-near
+        action: review
+        when:
+          exhaustion_within: 5d
+        clear_above: 0.40
+        reason: >-
+          The budget is projected to run out before the period does, which is the only
+          case where the remaining days can still be protected.
+
+      - name: freeze-when-nearly-exhausted
+        action: freeze
+        when:
+          remaining_below: 0.10
+        clear_above: 0.30
+        reason: >-
+          Under a tenth of a monthly budget remains. The freeze lifts at the period
+          boundary; nothing shipped before then returns the spend.
+    exemptions:
+      - class: reliability-fix
+        description: >-
+          A change whose purpose is to stop the budget being spent. Approved by the
+          owning team, which is a record of a decision rather than a check on one.
+        approver: payments-platform
+        max_duration: 24h

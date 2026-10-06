@@ -39,6 +39,9 @@ from it.
 | `generator/burn_rate.py` | What a burn-rate tier buys: detection, cost, and what it cannot see. |
 | `generator/render.py` | Rendering a policy into alerting rules, alarms and a budget report. |
 | `templates/` | Layout and prose for the targets with no serialiser; values are escaped, never trusted. |
+| `policy/budget.py` | The error-budget policy: what a budget state permits, and what the control gets wrong. |
+| `policy/rules.yaml` | A worked policy. Read by the evaluator and by the Terraform gate, so they cannot disagree. |
+| `policy-gate.tf` | Where a decision is published, and the two permissions that make publishing it mean something. |
 | `terraform.tfvars.example` | Placeholder values; copy to `terraform.tfvars`, which is ignored. |
 | `.tflint.hcl` | Lint configuration, including the conventions this repository enforces on itself. |
 
@@ -53,6 +56,8 @@ from it.
 | `spec_dir` | `specs` | Must be inside the repository; an absolute or `..` path is refused. |
 | `spec_file_pattern` | `*.yaml` | Single-segment glob, so it cannot reach outside `spec_dir`. |
 | `tags` | `{}` | Merged into the provider's default tags. Keys may not start with `aws:`. |
+| `policy_rules_file` | `policy/rules.yaml` | Must be inside the repository. Read by Terraform and by the evaluator. |
+| `gate_parameter_tier` | `Standard` | Caps a published decision at 4 KB. The advanced tier raises it, and costs. |
 
 ## Getting started
 
@@ -450,6 +455,139 @@ figure is a lower bound. `G411` says so in the alarm file and in the report.
 Artifacts are written under `generated/`, which is ignored: the specification is the reviewed
 document and anything rendered from it is rebuilt rather than read as a diff.
 
+## Enforcing an error budget
+
+```bash
+python3 -m policy.budget specs --rules policy/rules.yaml --strict        # audit the policy
+python3 -m policy.budget specs --observations budget.yaml                # decide
+python3 -m policy.budget specs --observations budget.yaml --json         # the decision documents
+python3 -m policy.budget specs --observations budget.yaml \
+        --previous current.json --gate checkout-api                      # with exit thresholds
+python3 -m policy.budget specs --observations budget.yaml \
+        --enforce checkout-api                                           # exit 3 if blocked
+```
+
+Exit status is `0` clean, `1` findings, `2` input that could not be read, and `3` the gate named
+by `--enforce` blocks this deployment. `3` is distinct on purpose: a gate returning the same
+status when it blocks and when it breaks is a gate that fails open the first time somebody
+appends `|| true`.
+
+Consumption is an **input**. Nothing here queries a metric backend, for the same reason the
+source adapters do not: it keeps the arithmetic reviewable without an account, and it keeps a
+credential out of the one component that is allowed to stop a release.
+
+A gate names the objectives it governs, how they `combine`, what an unreadable budget means
+(`on_unreadable_budget`), how old a figure may be (`max_budget_age`), and a list of rules. A rule
+triggers on `remaining_below`, on `exhaustion_within`, or on either, takes one of three `action`s
+— `notify`, `review`, `freeze` — and names the level it releases at in `clear_above`. Exemptions
+are classes of change a freeze does not block, each with an `approver` and a `max_duration`.
+[`policy/rules.yaml`](policy/rules.yaml) is a worked one.
+
+### What the control actually does
+
+**A threshold on the remaining budget is a lagging control.** Remaining budget is a level; what
+decides whether stopping deployments helps is the rate. A service at 30% remaining with no burn
+will never exhaust its budget and freezing it achieves nothing; a service at 60% burning at 10x
+exhausts in days and is not caught by a rule about 30%. So the projection is the primary
+condition and the level is a floor beneath it:
+
+```
+time to exhaustion = remaining_fraction x objective_window / burn_rate
+```
+
+**The projection's error has a stated direction.** On a rolling window, spend ages out as the
+window advances and the expression does not subtract it, so the figure under-estimates the time
+available and the control triggers earlier than strictly necessary. On a calendar window nothing
+ages out, so the consumption is exact — but the window *ends*, and the projection does not know
+that, which is why a horizon reaching past the reset is reported (`P306`).
+
+**A freeze is never ended by a fix.** On a rolling window the spend that caused it leaves the
+window `window_length` after it happened, so the exit date is set by *when* the budget was spent
+and nothing done afterwards moves it. On a calendar window nothing returns until the period
+boundary. Either way "we have shipped the fix, please unblock us" is not an exit condition, and
+the exits that do exist are the window advancing, an enumerated exemption, or changing the
+objective.
+
+**A gate with one threshold flaps, and every flap is a pipeline state change.** Each rule
+therefore carries `clear_above` as well as its trigger, and the band between them is checked
+against the budget's quantum — one event moves the remaining fraction by `1 / budget_events`, and
+a band narrower than a handful of those is crossed by ordinary variation rather than by the
+service. Release is a staircase rather than a switch: as the remaining fraction rises it passes
+each blocking rule's exit in turn, so a frozen gate de-escalates to `review` before it clears.
+
+**A stale figure widens both thresholds.** A decision made from a figure computed `age` ago is a
+decision about `age` ago; at burn rate `B` the remaining fraction moves `B x age / window` in
+that time. When that approaches the hysteresis band the two thresholds are indistinguishable in
+practice, however carefully they were chosen (`P303`).
+
+**The direction a gate fails in has no safe default.** Closed stops every deployment including
+the fix for whatever made the budget unreadable; open disables the policy during exactly the
+outage it exists for. `on_unreadable_budget` is required per gate, like the window kind in a
+specification, and the published decision records the readability of every objective rather than
+only the state — so nothing downstream has to infer which of the two cases it is looking at.
+
+### The gate
+
+A decision is published to one Parameter Store parameter per deployable unit, and that parameter
+is read as well as written: hysteresis needs the state the gate is in, and a stateless evaluator
+cannot invent it. Three consequences are visible in `policy-gate.tf`.
+
+- **Terraform does not own the value.** The state changes many times a day, from a job rather
+  than from a plan, so `ignore_changes` covers it. Without that, an unrelated `terraform apply`
+  would silently thaw a frozen gate, and nothing in the plan output would look like a
+  reliability decision. The cost is accepted: drift on the value is no longer reported here, and
+  a gate that stopped being written to is detected on the read side instead, by the age of the
+  figure in the document.
+- **Read and write are separate policies.** A deployment role holding the write permission can
+  decide it is not frozen, and would, under the pressure that makes a freeze matter. The
+  policies are created and attached to nothing, so until an operator attaches them the gate is
+  unreadable and every pipeline resolves through its failure direction.
+- **The decision is a plain `String`.** Not the cautious choice, and deliberately so: a budget
+  decision is not a secret, and encrypting it puts a key policy on the gate's read path — a new
+  way for the gate to become unreadable, which is the one case the failure direction exists to
+  cover.
+
+Four things are refused at plan time, and they are the ones Terraform depends on rather than the
+policy's arithmetic: a missing or unparseable policy document, a document that is actually an
+objective specification, two gates sharing a unit, and a gate governing an objective no
+specification defines. The last is the sharpest — at runtime such a gate has no condition to
+evaluate, so its failure direction decides every deployment it covers for as long as the
+reference is wrong, with the document still reading as configured. The arithmetic is left to
+`policy/budget.py`, because a second implementation of it in HCL is two implementations that
+will disagree.
+
+One caveat about `--strict` in a pipeline: `P307` is a statement about where *now* falls in a
+calendar period, so a policy governing a calendar-window objective can change its warning count
+with the date. Pass `--now` when the result has to be reproducible.
+
+| Code | Severity | What it means |
+|---|---|---|
+| `P100` | error | The policy declares no gate, so it enforces nothing. |
+| `P101` | error | A gate declares no rule, so no budget state changes it. |
+| `P102` | error | A gate governs no objective, so it permits every deployment. |
+| `P200` | error | Two gates share a unit, so one silently replaces the other. |
+| `P201` | error | A gate governs an objective nothing defines, so its failure direction decides permanently. |
+| `P202` | warning | An objective no gate acts on: a measurement rather than a commitment. |
+| `P203` | error | A unit name exceeds the configuration's name budget. |
+| `P204` | note/warning | How several objectives on one gate combine, and what that hides. |
+| `P300` | note | The exhaustion projection, and the direction of its error. |
+| `P301` | warning | Every rule reads the level alone, which is a lagging control. |
+| `P302` | error/warning | No exit, an exit below the entry, or a band narrower than the measurement's quantum. |
+| `P303` | note/warning | What the staleness allowance does to the hysteresis band. |
+| `P304` | note | What ends a freeze, which is the window and not a fix. |
+| `P305` | warning | A gentler rule that can never be the gate's state. |
+| `P306` | warning | A projection horizon reaching past the window it is computed from. |
+| `P307` | note/warning | How much budget a calendar window can still lose before it resets. |
+| `P308` | note | The smallest change in remaining budget one event can make. |
+| `P309` | note | Why a projection trigger has a level-shaped exit. |
+| `P400` | note | The gate's failure direction, and what it costs in this gate's terms. |
+| `P401` | warning | The gate's strongest action blocks nothing, so its failure direction is inert. |
+| `P402` | error | An exemption with no expiry: the usual way a gate ends up permanently off. |
+| `P403` | warning | An exemption that outlives any freeze it is granted against. |
+| `P404` | note | The approver is the team the gate stops, so the exemption records a decision rather than checking one. |
+| `P405` | error | A duplicated exemption class, where document order decides the approver. |
+| `P406` | warning | A gate that can freeze and exempts nothing, so a freeze blocks its own remedy. |
+
 ## Conventions
 
 - Inputs are validated where they are declared; cross-field rules that a single input
@@ -461,6 +599,8 @@ document and anything rendered from it is rebuilt rather than read as a diff.
   silence.
 - Version constraints are floors with closed upper bounds, and each bound carries the
   reason it exists.
+- A control states the direction of its own error. A projection whose bias is unknown cannot be
+  the reason a release is stopped.
 - A translation that cannot preserve something says so and stops. Nothing is quietly
   substituted, approximated or partially emitted, because every one of those produces
   a configuration that deploys cleanly and reports the wrong thing.
