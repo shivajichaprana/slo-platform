@@ -46,6 +46,8 @@ from it.
 | `.tflint.hcl` | Lint configuration, including the conventions this repository enforces on itself. |
 | `tests/` | The suite, including the checks the repository makes about its own consistency. |
 | `requirements-dev.txt` | What the checks need, as floors with closed upper bounds. |
+| `.github/workflows/ci.yml` | The gates, split by what a failure would tell you. |
+| `.flake8`, `.yamllint.yaml` | Lint limits, committed so a local run and the gate agree. |
 
 ## Configuration
 
@@ -630,6 +632,41 @@ are the ones most likely to catch a future edit:
   does not depend on the error rate is asserted by computing it at four rates, not by
   pinning the number the code happens to produce — so an edit that changes what the
   figure means fails even when the shape of the output is unchanged.
+
+### Continuous integration
+
+`.github/workflows/ci.yml` runs six gates on every push and pull request, split by what a
+failure would tell you rather than by which tool produces it — a specification that no
+longer validates, arithmetic that changed, a policy that refers to objectives nothing
+defines, and Terraform that no longer parses are four different repairs, and one job
+running all four reports only the first.
+
+| Gate | What it fails on |
+|---|---|
+| `validate specifications` | Any finding from `tools/validate-specs.py` under `--strict`, and a `--json` report that is not parseable on its own. |
+| `unit tests` | The suite, on the oldest and the newest Python the modules claim to support. |
+| `render artifacts` | A plan that produces no artifact, a rule file that does not parse, or a rendered expression still carrying a placeholder. |
+| `audit error-budget policy` | Any error or warning from the policy audit against the specifications in the same checkout. |
+| `lint` | `pyflakes`, `flake8` and `yamllint`, each reading a committed configuration so a local run and the gate cannot disagree. |
+| `terraform` | `fmt -check`, `validate` against a backend-less init, and `tflint`. |
+
+Three deliberate choices in that file:
+
+- **Actions are pinned to a commit, never to a tag.** A tag is a reference the publisher
+  can repoint, so a pinned tag is a dependency that changes without a commit here. The
+  readable version is in the comment beside each SHA.
+- **The render gate does not run under `--strict`.** The generator's warnings describe
+  what a burn-rate policy cannot see — the band of slow burns below its lowest threshold,
+  chiefly — which is a property of the objective its author chose, not a fault introduced
+  by the change under test.
+- **`ci complete` is the single required check, and it runs under `if: always()`.** A
+  branch protection rule naming every job leaves the next job added here ungated until
+  somebody remembers to add it there as well; and without `always()` a cancelled or
+  skipped dependency leaves the gate job *skipped*, which several interfaces present as a
+  pass.
+
+Nothing in the pipeline needs credentials: every adapter compiles payloads rather than
+sending them, and `terraform init -backend=false` needs the providers but not an account.
 
 ## Conventions
 

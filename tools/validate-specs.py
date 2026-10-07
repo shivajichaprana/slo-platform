@@ -359,7 +359,8 @@ def discover(target: Path, pattern: str) -> list[Path]:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("target", nargs="?", default="specs", type=Path,
                         help="specification file, or directory to search (default: specs)")
     parser.add_argument("--schema", default=Path("schema/slo.schema.json"), type=Path,

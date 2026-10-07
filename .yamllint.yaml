@@ -1,0 +1,20 @@
+---
+# The YAML in this repository is read by people as much as by parsers, so the
+# rules that are relaxed are relaxed for a stated reason rather than because
+# the default was inconvenient.
+extends: default
+
+rules:
+  # Matches the Python limit, for the same reason: a specification's prose
+  # explains why an objective is written the way it is.
+  line-length:
+    max: 110
+  # A single document per file throughout; the marker adds nothing.
+  document-start: disable
+  comments:
+    min-spaces-from-content: 1
+  # GitHub's workflow schema spells the trigger block `on`, which YAML 1.1
+  # reads as a boolean. The key is correct and the warning is about the
+  # specification, not about this file.
+  truthy:
+    check-keys: false

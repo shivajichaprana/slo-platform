@@ -1,0 +1,12 @@
+[flake8]
+# 110 rather than 79: these modules carry their reasoning in the code, and a
+# reason wrapped at 79 characters is read as three fragments. The limit still
+# exists because beyond it a line stops being reviewable in a side-by-side
+# diff, which is where this code is actually read.
+max-line-length = 110
+# Checked by the suite's own imports instead: the tool directories are added
+# to `sys.path` at run time, so an import after that is not misplaced.
+per-file-ignores =
+    generator/*.py: E402
+    policy/*.py: E402
+    tests/*.py: E402
