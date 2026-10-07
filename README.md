@@ -44,6 +44,8 @@ from it.
 | `policy-gate.tf` | Where a decision is published, and the two permissions that make publishing it mean something. |
 | `terraform.tfvars.example` | Placeholder values; copy to `terraform.tfvars`, which is ignored. |
 | `.tflint.hcl` | Lint configuration, including the conventions this repository enforces on itself. |
+| `tests/` | The suite, including the checks the repository makes about its own consistency. |
+| `requirements-dev.txt` | What the checks need, as floors with closed upper bounds. |
 
 ## Configuration
 
@@ -587,6 +589,47 @@ with the date. Pass `--now` when the result has to be reproducible.
 | `P404` | note | The approver is the team the gate stops, so the exemption records a decision rather than checking one. |
 | `P405` | error | A duplicated exemption class, where document order decides the approver. |
 | `P406` | warning | A gate that can freeze and exempts nothing, so a freeze blocks its own remedy. |
+
+## Testing
+
+```bash
+python3 -m pip install -r requirements-dev.txt
+python3 -m unittest discover -s tests -t tests
+```
+
+The suite is stdlib `unittest` and imports the modules the way the tools themselves do,
+from a checkout rather than from an installed package. It needs no running backend and
+no credentials: every adapter here compiles a payload and never sends one, so the
+arithmetic is checkable offline, which is the property the whole repository is arranged
+around.
+
+| Module | What it holds the code to |
+|---|---|
+| `tests/test_spec_model.py` | Parsing a specification into the model: durations, both window kinds, identity, and the difference between an absent sampling rate and a zero one. |
+| `tests/test_schema.py` | The schema's deliberate refusals — no percentile indicator, no default window kind, no objective of 1 — and the bounds it shares with the model. |
+| `tests/test_validate_specs.py` | Every finding the validator can emit, fired by a document that earns it, plus the exit ladder. |
+| `tests/test_burn_rate.py` | The arithmetic, as closed-form identities rather than recorded outputs. |
+| `tests/test_render.py` | Escaping, identity transliteration, and the structure of each rendered artifact. |
+| `tests/test_policy.py` | The projection, the calendar boundaries, the action ladder, and what each `combine` mode means. |
+
+Three of those are assertions about the repository rather than about a function, and they
+are the ones most likely to catch a future edit:
+
+- **Finding codes are checked in both directions.** Every code the validator can emit is
+  exercised by a test, every code a test asserts on is one the validator can emit, and
+  every emitted code appears in this README. The set of exercised codes is read from the
+  test module's own source rather than accumulated as the tests run — `unittest` orders
+  classes alphabetically, so a set filled in at run time is a claim about test ordering.
+- **Figures that exist twice are asserted to be one figure.** The identity budget is
+  checked across the schema pattern, the model and the validator; the duration parsers in
+  the model and the validator are compared across a range of inputs; the reachability
+  boundary the generator re-derives is checked against the one the validator reports; and
+  every `notify` value the schema permits is checked against the urgency table the
+  shadowing comparison indexes with.
+- **The arithmetic is tested as identities.** That the share of budget spent at detection
+  does not depend on the error rate is asserted by computing it at four rates, not by
+  pinning the number the code happens to produce — so an edit that changes what the
+  figure means fails even when the shape of the output is unchanged.
 
 ## Conventions
 

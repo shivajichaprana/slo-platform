@@ -1,0 +1,22 @@
+# Everything needed to run the checks in this repository against a checkout.
+#
+# Floors with closed upper bounds, and each bound carries the reason it exists
+# — the same rule the Terraform version constraints follow. A floor alone lets
+# a major release change behaviour under an unchanged file; a pin alone means
+# a security fix needs a commit here before it can be taken.
+
+# Reads every specification, policy and generated rule file.
+PyYAML>=6.0,<7.0
+
+# Draft 2020-12 support. The floor is 4.18 rather than 4.0 because the
+# referencing rewrite landed there and the schema is validated by $ref
+# throughout; 3.x accepts the schema and silently does not enforce
+# `additionalProperties: false` under a `$ref`, which is the one thing the
+# document shape depends on.
+jsonschema>=4.18,<5.0
+
+# Lint. Bounded at the next major on both, because a new default rule set is
+# a behaviour change to this repository's own gate.
+pyflakes>=3.1,<5.0
+flake8>=7.0,<8.0
+yamllint>=1.33,<2.0
