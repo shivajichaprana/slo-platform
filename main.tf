@@ -47,15 +47,15 @@ resource "terraform_data" "scaffold_guards" {
       error_message = "spec_dir must be a path inside the repository: an absolute path or one containing \"..\" puts the objectives outside the review that covers the alerts generated from them."
     }
 
-    # The narrowest AWS name limit this configuration reaches is 64 characters
-    # (an IAM role name). Every deployed name is DERIVED from the prefix, the
-    # environment and an objective's own name, so an overflow is invisible to
-    # whoever set those three and surfaces only when the resource is created.
-    # The input validations below cannot guarantee the budget on their own:
-    # their widest legal values exceed it together.
+    # Every deployed name is DERIVED from the prefix, the environment and
+    # either an objective's own name or a fixed policy suffix, against the
+    # 64-character ceiling locals.tf imposes and justifies there. An overflow
+    # is invisible to whoever set the first two and surfaces only when the
+    # resource is created. The input validations below cannot guarantee the
+    # budget on their own: their widest legal values exceed it together.
     precondition {
       condition     = local.derived_name_length <= local.derived_name_budget
-      error_message = "name_prefix (\"${var.name_prefix}\") and environment (\"${var.environment}\") give a worst-case derived name of ${local.derived_name_length} characters against a limit of ${local.derived_name_budget} (${local.objective_name_reserve} reserved for an objective name, ${local.alert_suffix_reserve} for the alert tier suffix). Shorten name_prefix by at least ${local.derived_name_length - local.derived_name_budget} characters."
+      error_message = "name_prefix (\"${var.name_prefix}\") and environment (\"${var.environment}\") give a worst-case derived name of ${local.derived_name_length} characters against a ceiling of ${local.derived_name_budget} (${local.objective_name_reserve} reserved for an objective or gate unit name, ${local.gate_policy_suffix_reserve} for the longest policy suffix; the wider of the two shapes applies). Shorten name_prefix by at least ${local.derived_name_length - local.derived_name_budget} characters."
     }
   }
 }

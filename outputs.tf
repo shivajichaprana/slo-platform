@@ -14,8 +14,8 @@ output "resource_name_prefix" {
 }
 
 output "objective_name_budget" {
-  description = "Characters actually left for an objective's own name by this name_prefix and environment. The guard in main.tf refuses a pair that leaves fewer than the reserved 32."
-  value       = local.derived_name_budget - length(local.resource_name_prefix) - 1 - local.alert_suffix_reserve
+  description = "Characters left for an objective's own name, or a gate's unit name, by this name_prefix and environment. The guard in main.tf refuses a pair that leaves fewer than the reserved 32."
+  value       = local.derived_name_budget - length(local.gate_parameter_prefix)
 }
 
 output "spec_dir" {

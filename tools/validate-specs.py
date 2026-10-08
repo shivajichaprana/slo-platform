@@ -56,11 +56,11 @@ NOMINAL_CALENDAR_MINUTES = {
     "quarter": 91 * 1440,
 }
 
-# The deployment's own name prefix, the environment and a tier suffix share a
-# 64-character ceiling with the objective's identity, which leaves 32. The
-# schema bounds `service` and `name` individually; only their sum matters, and
-# only this check can see it — the same shape as the name-budget precondition
-# in the Terraform configuration, for the same reason.
+# The deployment's own name prefix and the environment share a 64-character
+# ceiling with the objective's identity, which leaves 32. The schema bounds
+# `service` and `name` individually; only their sum matters, and only this
+# check can see it — the same shape as the name-budget precondition in the
+# Terraform configuration, for the same reason.
 OBJECTIVE_KEY_BUDGET = 32
 
 SEVERITY_ORDER = {"error": 0, "warning": 1}
@@ -135,7 +135,7 @@ def check_objective(doc_label: str, service: str, obj: dict[str, Any], report: R
             "E202", where,
             f"service and name together are {len(key)} characters ('{key}'), over the "
             f"{OBJECTIVE_KEY_BUDGET}-character identity budget. Every deployed name is derived from "
-            f"the deployment prefix, this identity and a tier suffix against a 64-character ceiling, "
+            f"the deployment prefix and this identity against a 64-character ceiling, "
             f"so the overflow appears only when a resource is created. Shorten the objective name.",
         )
 

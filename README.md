@@ -19,6 +19,14 @@ from it.
 | Indicator queries | Indicator definition and a window | A query written once and reused at every window answers the same thing every time, which quietly turns a multi-window alert policy into a single alert repeated. |
 | Policy decisions | Budget consumption | "Stop shipping when the budget is gone" is only enforceable if the budget is a number something can read. |
 
+## Documentation
+
+| Page | What it answers |
+|---|---|
+| [`docs/slo-model.md`](docs/slo-model.md) | Why an objective is represented this way, and what the derived arithmetic actually claims — the budget, the burn-rate identities, what a tier cannot see, and where the budget policy's usual advice is wrong. |
+| [`docs/spec-reference.md`](docs/spec-reference.md) | Every field of both documents: type, bounds, the reason each bound exists, and the checks that bind it. |
+| This file | What the repository produces, how to run it, and the full finding-code tables. |
+
 ## Layout
 
 | Path | Contents |
@@ -48,6 +56,8 @@ from it.
 | `requirements-dev.txt` | What the checks need, as floors with closed upper bounds. |
 | `.github/workflows/ci.yml` | The gates, split by what a failure would tell you. |
 | `.flake8`, `.yamllint.yaml` | Lint limits, committed so a local run and the gate agree. |
+| `docs/slo-model.md` | The model and its arithmetic, with the results the specification format obscures. |
+| `docs/spec-reference.md` | The field-by-field contract of both documents. |
 
 ## Configuration
 
@@ -76,6 +86,80 @@ A fresh checkout plans cleanly and creates nothing, because `specs/` holds no ob
 yet. That state is reported by the `slo_specs_absent` output rather than left to be
 inferred from an empty plan — see below.
 
+## Adopting this for a service
+
+The order matters more than any individual step. Each stage produces something checkable
+before the next one can take a decision away from anybody, which is the only reason a
+control like this survives contact with a team.
+
+**1. Write one objective, not five.** Copy `specs/example.yaml`, keep a single objective,
+and point it at a signal that already exists. The first objective's job is to be argued
+with; a file of five is a file nobody reviews. `tier` and `blind_spots` are the two fields
+worth the most discussion, and both are required for that reason.
+
+**2. Make it validate.** `python3 tools/validate-specs.py specs --strict` reads the schema
+first and the arithmetic second.
+Warnings are fatal here on purpose — every one of them describes an alert policy that
+deploys and reports the wrong thing. Expect `W403` until the `sampling` block is filled in;
+that block is what lets the validator work out whether the objective is finer than its own
+signal.
+
+**3. Read what the alerts would promise before deploying any.**
+`python3 generator/render.py specs --render report` prints, per tier, when it fires at several error rates, how much of the budget is gone by then, the
+shortest incident it cannot see at all, and the band of slow burns the policy misses
+entirely. If those figures are not acceptable, the tier list is wrong — not the threshold,
+which is derived. `docs/slo-model.md` explains each column.
+
+**4. Deploy the alerts in the quietest form the target allows.**
+`python3 generator/render.py specs --render prometheus --out generated/rules` renders them —
+`--render cloudwatch` for the other target. Route them to a ticket queue first regardless of what `notify`
+says, and leave them there for at least one full objective window. A burn-rate policy's
+first month is data about the indicator, not about the service: a denominator measured in
+the wrong place shows up as an alert that fires during a deploy, or one that stays silent
+through an incident everybody saw.
+
+**5. Reconcile the alerts against what actually happened.** For every incident in that
+period, ask which tier fired and when. The two answers worth acting on are a tier that
+fired after the incident was already being handled — its long window is too long for the
+promise it is making — and an incident nothing fired for, which is either shorter than the
+detection floor or inside the slow-burn band. Both are reported by the generator before the
+fact; the point of this step is to confirm the report described reality.
+
+**6. Only then write a policy, and start it at `notify`.** Copy `policy/rules.yaml`, keep
+the gate's rules but set every `action` to `notify`, and run
+`python3 policy/budget.py specs --rules policy/rules.yaml --strict`. A policy in this
+shape blocks nothing and still publishes a decision, so the figures it would have acted on
+can be read for a period before they stop a release. `on_unreadable_budget` has to be
+answered even here, because it is what the gate does when the budget cannot be measured at
+all.
+
+**7. Attach the gate, writer first.** Apply the configuration, attach the writer policy to
+the budget evaluator, and let it publish for a while with nothing reading the parameter.
+Then attach the reader policy to the deployment roles and have the pipeline call
+`budget.py --enforce <unit>`. Until the reader policy is attached every gate is unreadable,
+so each pipeline resolves through its own failure direction — which is the behaviour to
+confirm deliberately rather than discover.
+
+**8. Promote `review` and `freeze` last, and say so out loud.** A freeze is not ended by
+shipping a fix; it ends when the window advances, when an enumerated exemption is claimed,
+or when the objective changes. Make sure the team that owns the service knows that before
+the first freeze rather than during it, and make sure a `reliability-fix` exemption exists —
+without one, a freeze blocks its own remedy.
+
+What to avoid, in each case because it produces something that looks right and is not:
+
+- **Do not hand-edit anything under `generated/`.** It is rebuilt from the specification and
+  is gitignored. An edited threshold is a threshold that no longer follows from the
+  objective, which is the single failure this repository exists to prevent.
+- **Do not raise an objective to silence an alert.** A weaker objective is a larger budget
+  and a higher threshold; the alert goes quiet because the commitment was reduced, and
+  nothing records that this is what happened. Change the tier, or change the service.
+- **Do not add a tier at the same burn rate as an existing one** to get a second
+  notification. It differs only in window, so the shorter always fires first (`W406`).
+- **Do not set every rule on a level.** Remaining budget is a level and exhaustion is a
+  rate; a level-only policy both freezes services that were never going to exhaust their
+  budget and misses the ones that are about to (`P301`).
+
 ## What this repository checks about itself
 
 Three input mistakes are refused before anything is created, and one correct-but-empty
@@ -87,9 +171,10 @@ state is reported rather than refused:
   are not reviewed in the same change as the alerts generated from them, which is the one
   property this repository exists to provide.
 - **A name prefix that leaves too little room** is refused. Every deployed name is derived
-  from the prefix, the environment and an objective's own name against a 64-character
-  ceiling, so an overflow is invisible to whoever set those three and would appear only
-  when a resource is created.
+  from the prefix, the environment and either an objective's own name or a fixed policy
+  suffix, against a 64-character ceiling this configuration imposes on itself and justifies
+  in `locals.tf`. An overflow is invisible to whoever set the first two and would appear
+  only when a resource is created.
 - **A spec directory that exists and is empty** is valid: it is what a fresh checkout
   looks like. It is reported through `slo_specs_absent`, because a configuration that
   deploys no alerts at all otherwise looks exactly like one whose objectives are all met.

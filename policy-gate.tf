@@ -117,7 +117,7 @@ locals {
   }
 
   policy_gate_parameter_names = {
-    for unit, gate in local.policy_gates : unit => "/${local.resource_name_prefix}/gate/${unit}"
+    for unit, gate in local.policy_gates : unit => "${local.gate_parameter_prefix}${unit}"
   }
 }
 
@@ -280,7 +280,7 @@ data "aws_iam_policy_document" "gate_reader" {
       # call fails with an access error that names none of the parameters above
       # and reads like a missing gate.
       length(local.policy_gates) > 0 ? [
-        "arn:${data.aws_partition.current.partition}:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter/${local.resource_name_prefix}/gate"
+        "arn:${data.aws_partition.current.partition}:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter${trimsuffix(local.gate_parameter_prefix, "/")}"
       ] : [],
     )
   }
