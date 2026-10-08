@@ -56,6 +56,7 @@ from it.
 | `requirements-dev.txt` | What the checks need, as floors with closed upper bounds. |
 | `.github/workflows/ci.yml` | The gates, split by what a failure would tell you. |
 | `.flake8`, `.yamllint.yaml` | Lint limits, committed so a local run and the gate agree. |
+| `Makefile` | Every check and the deployment path, running the same commands the gate runs. |
 | `docs/slo-model.md` | The model and its arithmetic, with the results the specification format obscures. |
 | `docs/spec-reference.md` | The field-by-field contract of both documents. |
 
@@ -76,11 +77,16 @@ from it.
 ## Getting started
 
 ```bash
+make deps                                      # what the checks need
 cp terraform.tfvars.example terraform.tfvars   # then edit it
-terraform init
-terraform validate
-terraform plan
+make check                                     # every gate, offline, no credentials
+make plan                                      # documents checked, then a reviewable plan
 ```
+
+`make` with no target lists them. `make check` runs the whole pipeline locally and needs
+no account: every adapter compiles a payload rather than sending one, and
+`terraform init -backend=false` needs the providers but not credentials. `make plan` and
+`make apply` are the only targets that reach one.
 
 A fresh checkout plans cleanly and creates nothing, because `specs/` holds no objectives
 yet. That state is reported by the `slo_specs_absent` output rather than left to be
@@ -698,8 +704,9 @@ around.
 | `tests/test_burn_rate.py` | The arithmetic, as closed-form identities rather than recorded outputs. |
 | `tests/test_render.py` | Escaping, identity transliteration, and the structure of each rendered artifact. |
 | `tests/test_policy.py` | The projection, the calendar boundaries, the action ladder, and what each `combine` mode means. |
+| `tests/test_makefile.py` | The Makefile against the pipeline: the same commands, in both directions. |
 
-Three of those are assertions about the repository rather than about a function, and they
+Four of those are assertions about the repository rather than about a function, and they
 are the ones most likely to catch a future edit:
 
 - **Finding codes are checked in both directions.** Every code the validator can emit is
@@ -717,6 +724,9 @@ are the ones most likely to catch a future edit:
   does not depend on the error rate is asserted by computing it at four rates, not by
   pinning the number the code happens to produce — so an edit that changes what the
   figure means fails even when the shape of the output is unchanged.
+- **The Makefile is compared to the pipeline command by command.** In both directions: a
+  target that drops a flag the gate passes fails, and so does a gate added to the pipeline
+  with no target and no stated reason for not having one. See below.
 
 ### Continuous integration
 
@@ -752,6 +762,24 @@ Three deliberate choices in that file:
 
 Nothing in the pipeline needs credentials: every adapter compiles payloads rather than
 sending them, and `terraform init -backend=false` needs the providers but not an account.
+
+### The Makefile and the pipeline
+
+`make check` is worth having only while its commands are the pipeline's commands, and
+nothing about either file makes a divergence visible: a target that has drifted still runs,
+still reports success, and reports it about something else. So `tests/test_makefile.py`
+reads both files and compares them — on the *expanded* recipe, with Make's variables
+resolved, because that is the string a shell would receive.
+
+| It fails on | Because |
+|---|---|
+| A target whose command differs from its step's, after expansion | `make check` would report a clean tree the gate then rejects. |
+| A step with no target and no entry in the file's list of deliberate exceptions | A gate added to the pipeline is otherwise unreachable locally, and nobody finds out until a push. |
+| `make check` not reaching a gated target, or reaching `fmt`, `plan`, `apply` or `deps` | The first is a gap; the second rewrites the tree or needs an account, and a gate that repairs what it checks always passes. |
+| A recipe line prefixed `-`, or ending `\|\| true` | A target that cannot fail is not a gate. |
+| `.SHELLFLAGS` without `-e` and `pipefail`, or a `SHELL` that is not bash | Each recipe line is its own shell, so without them a command upstream of a pipe fails and the target succeeds. |
+| `apply` taking anything but the saved plan, or losing its confirmation | `terraform apply` with no plan file re-plans and applies in one step, so what is applied was never the thing anybody read. |
+| A phony target with no `##` help line, or a rule that is neither phony nor the plan file | `make` with no argument lists the targets, and an undocumented one is a target nobody runs. |
 
 ## Conventions
 
